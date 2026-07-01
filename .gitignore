@@ -29,3 +29,6 @@ frontend/.vite/
 
 # Docs source (PDFs kept locally, not part of the shipped repo)
 *.pdf
+
+
+.env

@@ -1,11 +1,7 @@
-"""Download NICE guideline pages and save as clean, metadata-tagged JSON.
+"""Download NICE guideline pages and save each section as clean, tagged JSON.
 
-Output: one JSON file per guideline in data/raw/nice/, shape:
-    {"guideline_id": "NG138", "title": ..., "section": ..., "text": ...}
-
-This corpus doubles as the RAG knowledge base (Chapter 7) and the seed
-corpus for synthetic QA generation (synthetic_generation.py), so it is
-worth getting the cleaning right here rather than downstream.
+Output feeds two things: the RAG knowledge base (backend/app/rag/ingest.py,
+Week 4) and the synthetic QA seed corpus (synthetic_generation.py).
 """
 
 import json
@@ -15,15 +11,19 @@ OUTPUT_DIR = Path("data/raw/nice")
 
 
 def fetch_guideline_ids() -> list[str]:
-    # TODO: enumerate target NICE guideline IDs (e.g. from nice.org.uk sitemap
-    # or a curated list) rather than crawling the whole site.
+    """Return NICE guideline IDs to download, e.g. ["NG138", ...].
+
+    TODO: scrape nice.org.uk's guidance index, or use a curated list.
+    """
     raise NotImplementedError
 
 
 def fetch_and_clean(guideline_id: str) -> list[dict]:
-    # TODO: fetch the guideline page(s), strip HTML/nav/boilerplate, split
-    # into sections, return one dict per section with guideline_id/title/
-    # section/text metadata.
+    """Fetch one guideline's page(s) and return cleaned section dicts.
+
+    Each dict: {"guideline_id", "title", "section", "text"}.
+    TODO: fetch HTML, strip boilerplate, split at section headings.
+    """
     raise NotImplementedError
 
 

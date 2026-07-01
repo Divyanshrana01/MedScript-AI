@@ -1,13 +1,18 @@
-"""Merge MedQA-derived pairs and synthetic NICE-derived pairs, apply the
-Llama-3 chat template, and produce the loss mask so only assistant-turn
-tokens contribute to the SFT gradient (system/user tokens are set to -100).
+"""Merge MedQA-derived and synthetic NICE-derived pairs into one Llama-3
+chat-formatted training file.
 
-Output is a single JSONL training file consumed by push_to_hub.py.
+Matching Llama-3's own chat template (rather than a custom format) matters
+because the model already learned to recognise this turn structure during
+pretraining. Loss masking (assistant-only tokens) happens downstream in
+ml/training/sft_train.py, not here.
 """
 
 import json
 from pathlib import Path
 
+# Keep in sync with the production agent's system prompt (configs/domain/
+# medical.yaml) so the model isn't trained against a different prompt than
+# the one it's served behind at inference time.
 SYSTEM_PROMPT = "You are a clinical decision support assistant trained on NICE guidelines."
 
 MEDQA_PATH = Path("data/raw/medqa/medqa_normalised.jsonl")
@@ -16,6 +21,7 @@ OUTPUT_PATH = Path("data/processed/train.jsonl")
 
 
 def to_chat_format(question: str, answer: str) -> dict:
+    """Wrap a (question, answer) pair into {"messages": [system, user, assistant]}."""
     return {
         "messages": [
             {"role": "system", "content": SYSTEM_PROMPT},
@@ -26,8 +32,11 @@ def to_chat_format(question: str, answer: str) -> dict:
 
 
 def medqa_to_pair(example: dict) -> dict:
-    # TODO: convert the MedQA MCQ + rationale into a free-text
-    # question/answer pair before passing to to_chat_format.
+    """Convert a normalised MedQA record into a free-text (question, answer) pair.
+
+    TODO: rephrase the MCQ stem as an open question and compose the answer
+    from correct_answer + rationale as prose, not "the answer is B".
+    """
     raise NotImplementedError
 
 

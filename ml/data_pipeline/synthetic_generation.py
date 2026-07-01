@@ -1,17 +1,14 @@
-"""distilabel pipeline: turn NICE guideline sections into synthetic
-instruction/response pairs using a teacher model (GPT-4o or Claude Sonnet).
+"""distilabel pipeline: NICE sections -> synthetic instruction/response pairs
+via a teacher model (GPT-4o / Claude Sonnet).
 
-Four steps: seed extraction (NICE sections) -> instruction generation ->
-response generation -> quality filtering (HelpSteer2 reward score +
-MinHash LSH dedup at 0.85 similarity).
+Steps: seed extraction -> instruction generation -> response generation ->
+quality filtering (HelpSteer2 score + MinHash LSH dedup at 0.85 similarity).
 
-Terminology rules come from the domain config so UK/BNF terms (paracetamol,
-adrenaline, salbutamol, ...) are enforced at generation time rather than
-corrected afterward.
+Terminology rules come from the domain config so UK/BNF terms are enforced
+at generation time instead of corrected afterward.
 
-Run on a small slice first (~10 NICE guidelines, ~50 pairs) end to end
-before scaling up -- catches format bugs before spending teacher-model
-API budget on the full run.
+Run on a small slice first (~10 guidelines) to catch format bugs before
+spending teacher-model API budget on the full corpus.
 """
 
 import json
@@ -37,18 +34,21 @@ OUTPUT_PATH = Path("data/synthetic/qa_pairs.jsonl")
 
 
 def load_seeds(limit: int | None = None) -> list[dict]:
+    """Load NICE section JSON files (collect_nice.py output) as generation seeds."""
     seeds = [json.loads(p.read_text()) for p in sorted(SEED_DIR.glob("*.json"))]
     return seeds[:limit] if limit else seeds
 
 
 def build_pipeline():
-    # TODO: wire up the actual distilabel Pipeline: seed extraction ->
-    # instruction generation (teacher model) -> response generation ->
-    # HelpSteer2 quality filter -> MinHash LSH dedup at 0.85 threshold.
+    """Build the distilabel Pipeline (seed -> instruction -> response -> filter).
+
+    TODO: wire up the actual distilabel steps described in the module docstring.
+    """
     raise NotImplementedError
 
 
 def main(limit: int | None = 50) -> None:
+    """Generate synthetic QA pairs from a slice of NICE seeds (default: 50)."""
     seeds = load_seeds(limit=limit)
     pipeline = build_pipeline()
     results = pipeline.run(seeds)

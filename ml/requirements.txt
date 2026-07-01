@@ -1,0 +1,9 @@
+# Local data-pipeline dependencies only (Week 1-4 scripts under
+# ml/data_pipeline/ and ml/evaluation/). GPU training deps (torch, unsloth,
+# trl, bitsandbytes) are installed fresh inside each Colab/Kaggle session,
+# not here -- see the Implementation Workflow doc, Chapter 3.
+pyyaml
+datasets
+huggingface_hub
+distilabel
+python-dotenv

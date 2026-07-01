@@ -1,8 +1,8 @@
 """Split train/validation, write a dataset card, and push the processed
 dataset to the HuggingFace Hub with a version tag.
 
-Training runs (ml/training/sft_train.py) reference a specific commit hash
-of this dataset so runs stay reproducible.
+Training runs reference a specific commit of this dataset, so runs stay
+reproducible even as new data versions are added later.
 """
 
 import json
@@ -30,6 +30,11 @@ def load_records() -> list[dict]:
 
 
 def main() -> None:
+    """Split, wrap, and push the dataset to the HuggingFace Hub.
+
+    Requires an authenticated HF session (HF_TOKEN, see .env.example) with
+    write access to HUB_REPO.
+    """
     records = load_records()
     split_idx = int(len(records) * (1 - VAL_FRACTION))
     dataset = DatasetDict(
@@ -39,7 +44,7 @@ def main() -> None:
         }
     )
     dataset.push_to_hub(HUB_REPO)
-    # TODO: write DATASET_CARD to the repo's README via huggingface_hub.upload_file
+    # TODO: write DATASET_CARD via huggingface_hub.upload_file(..., path_in_repo="README.md")
 
 
 if __name__ == "__main__":

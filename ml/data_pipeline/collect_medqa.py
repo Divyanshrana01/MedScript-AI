@@ -1,10 +1,7 @@
-"""Pull MedQA (USMLE) from HuggingFace and normalise it to an intermediate
-question / correct_answer / rationale format, ready for conversion to
-free-text instruction pairs in format_chat_template.py.
+"""Pull MedQA from HuggingFace and normalise it to question/answer/rationale.
 
-Retained for clinical reasoning patterns (differential diagnosis reasoning
-transfers across systems even though US and NHS guidelines differ) -- not
-used as a source of UK-specific facts.
+Retained only for differential-diagnosis reasoning patterns, not as a
+source of clinical facts (those come from NICE) -- MedQA is US-context.
 """
 
 import json
@@ -16,8 +13,10 @@ OUTPUT_PATH = Path("data/raw/medqa/medqa_normalised.jsonl")
 
 
 def normalise(example: dict) -> dict:
-    # TODO: map the bigbio/med_qa schema (question, options, answer_idx, ...)
-    # to {"question": ..., "correct_answer": ..., "rationale": ...}.
+    """Map a bigbio/med_qa record to {"question", "correct_answer", "rationale"}.
+
+    TODO: implement once the exact dataset schema has been inspected.
+    """
     raise NotImplementedError
 
 

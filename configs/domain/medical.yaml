@@ -2,6 +2,8 @@ domain:
   name: medical
   display_name: "Clinical Decision Support"
 
+# Data sources for both training and the RAG knowledge base.
+# PLAB is deferred per the agreed 6-8 week scope.
 datasets:
   - name: nice_guidelines
     source: local
@@ -10,8 +12,8 @@ datasets:
     source: hf
     repo: bigbio/med_qa
 
+# UK/BNF terms to enforce in synthetic generation, not US equivalents.
 terminology_rules:
-  # enforced in synthetic generation prompts (UK/BNF terms, not US/Indian equivalents)
   - use: paracetamol
     not: acetaminophen
   - use: adrenaline
@@ -25,12 +27,15 @@ terminology_rules:
 
 guideline_authority: NICE
 
+# Prompt variants live as .txt files under configs/prompts/ (added Week 5/6).
+# active_variant is the one line updated once the prompt-variants MLflow
+# experiment picks a winner.
 agents:
   clinical_qa:
     prompt_variants:
       direct: configs/prompts/clinical_direct.txt
       cot: configs/prompts/clinical_cot.txt
-    active_variant: direct  # placeholder until the prompt-variants MLflow experiment picks a winner
+    active_variant: direct
     temperature: 0.2
     max_tokens: 800
   literature:
@@ -41,6 +46,7 @@ agents:
     temperature: 0.3
     max_tokens: 600
 
+# Hybrid RAG tuning, consumed by backend/app/rag/retriever.py (Week 4).
 rag:
   embed_model: BAAI/bge-m3
   reranker: cross-encoder/ms-marco-MiniLM-L-12-v2
