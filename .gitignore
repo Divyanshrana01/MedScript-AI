@@ -1,0 +1,31 @@
+# Environments
+.venv/
+venv/
+__pycache__/
+*.pyc
+.env
+
+# Data and model artifacts (never committed; pulled from HF Hub by reference)
+data/raw/
+data/processed/
+data/synthetic/
+*.ckpt
+*.safetensors
+adapter_*/
+
+# MLflow local runs
+mlruns/
+mlflow.db
+
+# Node / frontend
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# Editor / OS
+.vscode/
+.idea/
+.DS_Store
+
+# Docs source (PDFs kept locally, not part of the shipped repo)
+*.pdf
