@@ -10,7 +10,7 @@ datasets:
     path: data/raw/nice
   - name: medqa
     source: hf
-    repo: bigbio/med_qa
+    repo: GBaker/MedQA-USMLE-4-options-hf
 
 # UK/BNF terms to enforce in synthetic generation, not US equivalents.
 terminology_rules:

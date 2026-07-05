@@ -5,5 +5,7 @@
 pyyaml
 datasets
 huggingface_hub
-distilabel
+distilabel[minhash,openai]
+beautifulsoup4
+datasketch==1.6.5  # newer datasketch breaks distilabel's MinHashDedup internals
 python-dotenv
