@@ -8,6 +8,7 @@ ml/training/sft_train.py, not here.
 """
 
 import json
+import re
 from pathlib import Path
 
 # Keep in sync with the production agent's system prompt (configs/domain/
@@ -31,13 +32,27 @@ def to_chat_format(question: str, answer: str) -> dict:
     }
 
 
-def medqa_to_pair(example: dict) -> dict:
-    """Convert a normalised MedQA record into a free-text (question, answer) pair.
+# MCQ stems almost always phrase the ask as "Which of the following ..."; swapping
+# that for "What" turns the stem into an open question without touching the
+# clinical scenario, so no options list is needed in the prompt.
+_MCQ_STEM = re.compile(r"which of the following", re.IGNORECASE)
 
-    TODO: rephrase the MCQ stem as an open question and compose the answer
-    from correct_answer + rationale as prose, not "the answer is B".
-    """
-    raise NotImplementedError
+
+def medqa_to_pair(example: dict) -> tuple[str, str]:
+    """Convert a normalised MedQA record into a free-text (question, answer) pair."""
+    question = _MCQ_STEM.sub(
+        lambda m: "What" if m.group(0)[0].isupper() else "what",
+        example["clinical_scenario"].strip(),
+        count=1,
+    )
+
+    answer = example["correct_answer"].strip()
+    if not answer.endswith("."):
+        answer += "."
+    # rationale is null in the current MedQA export, but future sources may fill it.
+    if example.get("rationale"):
+        answer = f"{answer} {example['rationale'].strip()}"
+    return question, answer
 
 
 def load_jsonl(path: Path) -> list[dict]:
@@ -49,7 +64,7 @@ def main() -> None:
     for example in load_jsonl(MEDQA_PATH):
         pairs.append(to_chat_format(*medqa_to_pair(example)))
     for qa in load_jsonl(SYNTHETIC_PATH):
-        pairs.append(to_chat_format(qa["question"], qa["answer"]))
+        pairs.append(to_chat_format(qa["instruction"], qa["response"]))
 
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(OUTPUT_PATH, "w") as f:
