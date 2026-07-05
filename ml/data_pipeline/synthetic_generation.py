@@ -1,16 +1,26 @@
 """distilabel pipeline: NICE sections -> synthetic instruction/response pairs
-via a teacher model (GPT-4o).
+via a teacher model.
 
-Steps: seed extraction -> instruction generation -> response generation ->
-quality filtering (LLM-judge rating + MinHash dedup at 0.85 similarity).
+Two sequential phases instead of one DAG so the question and answer steps
+never share the teacher's tokens-per-minute window at the same time (the
+concurrent-window saturation is what caused repeated 429 crashes on tier-1):
 
-Terminology rules come from the domain config so UK/BNF terms are enforced
-at generation time instead of corrected afterward.
+  Phase 1: seeds missing a question  -> generate_question -> questions bank
+  Phase 2: banked questions missing an answer -> answer -> judge -> filter
+           -> appended to the output dataset
 
-Judge LLM is gpt-4o-mini, not the gpt-4o teacher -- a smaller model grading
-a larger one's output is a cheaper, reasonably independent quality signal.
+Both phases are resume-aware: work already in the bank or the output file is
+never regenerated, so a crash or rerun costs nothing extra. Rows whose
+generation failed (429 outlasting retries -> None) are dropped by a guard
+step before they can reach distilabel's router, which crashes on None-filled
+batches.
 
-Run on a small slice first (~10 guidelines) to catch format bugs before
+Teacher/judge default to OpenAI (gpt-4o / gpt-4o-mini). Set
+TEACHER_PROVIDER=gemini (and optionally JUDGE_PROVIDER) to run against
+Gemini's OpenAI-compatible endpoint on the free tier instead -- needs
+GEMINI_API_KEY in .env.
+
+Run on a small slice first (main(limit=10)) to catch format bugs before
 spending teacher-model API budget on the full corpus.
 """
 
@@ -81,9 +91,19 @@ Every answer must cite the relevant guideline."""
 
 SEED_DIR = Path("data/raw/nice")
 OUTPUT_PATH = Path("data/synthetic/qa_pairs.jsonl")
+BANK_PATH = Path("data/synthetic/questions_bank_v2.jsonl")
 
-TEACHER_MODEL = "gpt-4o"
-JUDGE_MODEL = "gpt-4o-mini"
+# Providers are env-switchable so the same pipeline can run on OpenAI or on
+# Gemini's OpenAI-compatible endpoint (free tier) when budget is tight.
+GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
+DEFAULT_MODELS = {
+    "openai": {"teacher": "gpt-4o", "judge": "gpt-4o-mini"},
+    "gemini": {"teacher": "gemini-2.5-flash", "judge": "gemini-2.5-flash"},
+}
+TEACHER_PROVIDER = os.getenv("TEACHER_PROVIDER", "openai")
+JUDGE_PROVIDER = os.getenv("JUDGE_PROVIDER", TEACHER_PROVIDER)
+TEACHER_MODEL = os.getenv("TEACHER_MODEL", DEFAULT_MODELS[TEACHER_PROVIDER]["teacher"])
+JUDGE_MODEL = os.getenv("JUDGE_MODEL", DEFAULT_MODELS[JUDGE_PROVIDER]["judge"])
 PROMPT_VERSION = "v2"  # bump whenever the prompts or aspect list change
 
 MINHASH_THRESHOLD = 0.85
@@ -93,13 +113,30 @@ MIN_RESPONSE_CHARS = 150
 # citation, e.g. "... (CG113, section 1.1)" or "... [2011]".
 COMPLETE_ENDINGS = (".", "!", "?", ")", "]", '"')
 
-# The org is OpenAI tier 1: 30k tokens/min on gpt-4o, shared by the question
-# and answer steps running concurrently. Answer prompts embed the full
-# guideline excerpt (up to ~5k tokens), so answers go one at a time; once
-# retries exhaust on a 429 the step silently yields None and the row is lost.
-QUESTION_BATCH_SIZE = 2
+# The org is OpenAI tier 1: 30k tokens/min on gpt-4o. Answer prompts embed the
+# full guideline excerpt (up to ~5k tokens), so teacher calls go one at a time.
+QUESTION_BATCH_SIZE = 1
 ANSWER_BATCH_SIZE = 1
-JUDGE_BATCH_SIZE = 5  # gpt-4o-mini has its own, much higher TPM limit
+JUDGE_BATCH_SIZE = 5  # the judge model has its own, much higher rate limit
+
+
+def _make_llm(provider: str, model: str, max_new_tokens: int | None = None) -> OpenAILLM:
+    """OpenAILLM against either OpenAI or Gemini's OpenAI-compatible endpoint.
+
+    max_retries raised from the default 6: 429 backoff waits are short, and a
+    saturated TPM window can take longer than 6 retries to clear.
+    """
+    kwargs: dict = {"model": model, "max_retries": 12}
+    if max_new_tokens:
+        kwargs["generation_kwargs"] = {"max_new_tokens": max_new_tokens}
+    if provider == "gemini":
+        kwargs["base_url"] = GEMINI_BASE_URL
+        kwargs["api_key"] = os.environ["GEMINI_API_KEY"]
+    return OpenAILLM(**kwargs)
+
+
+def _key(row: dict) -> tuple[str, str, str]:
+    return (row["guideline_id"], row["section"], row["aspect"])
 
 
 def load_seeds(limit: int | None = None) -> list[dict]:
@@ -109,7 +146,11 @@ def load_seeds(limit: int | None = None) -> list[dict]:
 
 
 def expand_seeds(seeds: list[dict]) -> list[dict]:
-    """Fan each seed out to PAIRS_PER_SEED rows, one per sampled clinical aspect."""
+    """Fan each seed out to PAIRS_PER_SEED rows, one per sampled clinical aspect.
+
+    The RNG stream is consumed per seed in file order, so the seed->aspect
+    assignment is stable across runs -- resume filtering relies on that.
+    """
     rng = random.Random(42)
     expanded = []
     for seed in seeds:
@@ -119,6 +160,51 @@ def expand_seeds(seeds: list[dict]) -> list[dict]:
             row["question_prompt"] = f"Aspect: {aspect}\n\nExcerpt:\n{seed['text']}"
             expanded.append(row)
     return expanded
+
+
+def load_bank() -> dict[tuple, dict]:
+    """Load the questions bank: every question ever generated, keyed by seed."""
+    if not BANK_PATH.exists():
+        return {}
+    bank = {}
+    with open(BANK_PATH, encoding="utf-8") as f:
+        for line in f:
+            row = json.loads(line)
+            bank[_key(row)] = row
+    return bank
+
+
+def append_bank(rows: list[dict]) -> None:
+    BANK_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with open(BANK_PATH, "a", encoding="utf-8") as f:
+        for row in rows:
+            f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+def load_done() -> tuple[set[tuple], int]:
+    """Keys already answered in the output file, plus its row count (for ids)."""
+    if not OUTPUT_PATH.exists():
+        return set(), 0
+    done, count = set(), 0
+    with open(OUTPUT_PATH, encoding="utf-8") as f:
+        for line in f:
+            m = json.loads(line)["metadata"]
+            done.add((m["guideline_id"], m["section"], m["task_type"]))
+            count += 1
+    return done, count
+
+
+def build_instruction(row: dict) -> str:
+    """Combine the question with its source excerpt into one grounded prompt --
+    keeps the answer citing the actual passage instead of general knowledge.
+    """
+    return (
+        f"Guideline: {row['title']} ({row['guideline_id'].upper()}), "
+        f"section {row['section']}\n\n"
+        f"Excerpt:\n{row['text']}\n\n"
+        f"Question: {row['clinical_question']}\n\n"
+        "Answer using only the excerpt above."
+    )
 
 
 def _rating_of(row: dict) -> int | None:
@@ -157,30 +243,23 @@ def _passes_quality(row: dict) -> bool:
     )
 
 
-class BuildAnswerPrompt(Step):
-    """Combine the generated question with its source excerpt into one grounded
-    prompt -- keeps the answer step citing the actual passage instead of the
-    model's own general knowledge.
+class DropFailedGenerations(Step):
+    """Drop rows whose generation came back None/empty (a 429 that outlasted
+    retries). Without this, distilabel's router crashes on None-filled batches
+    ("list indices must be integers or slices, not str") and kills the run.
     """
 
     @property
     def inputs(self) -> "StepColumns":
-        return ["guideline_id", "title", "section", "text", "clinical_question"]
+        return ["generations"]
 
     @property
     def outputs(self) -> "StepColumns":
-        return ["instruction"]
+        return []
 
     def process(self, inputs: StepInput) -> "StepOutput":
-        for row in inputs:
-            row["instruction"] = (
-                f"Guideline: {row['title']} ({row['guideline_id'].upper()}), "
-                f"section {row['section']}\n\n"
-                f"Excerpt:\n{row['text']}\n\n"
-                f"Question: {row['clinical_question']}\n\n"
-                "Answer using only the excerpt above."
-            )
-        yield inputs
+        kept = [r for r in inputs if r.get("generations") and r["generations"][0]]
+        yield kept
 
 
 class FilterLowQuality(Step):
@@ -203,93 +282,91 @@ class FilterLowQuality(Step):
         yield kept
 
 
-def build_pipeline(seeds: list[dict]) -> Pipeline:
-    """Build the distilabel Pipeline: seed -> question -> answer -> judge -> dedup -> filter."""
-    # max_retries raised from the default 6: 429 backoff waits are ~1s, and a
-    # saturated 30k TPM window can take longer than 6 retries to clear.
-    teacher = OpenAILLM(
-        model=TEACHER_MODEL,
-        max_retries=12,
-        generation_kwargs={"max_new_tokens": 1024},
-    )
+def _distiset_rows(distiset) -> list[dict]:
+    if not distiset:
+        return []
+    leaf = next(iter(distiset.values()))
+    dataset = leaf["default"] if "default" in leaf else next(iter(leaf.values()))
+    return list(dataset)
 
-    # gpt-4o-mini judges gpt-4o's output -- a smaller, cheaper model on the
-    # same key. Not fully independent, but the free-tier Groq/Gemini
-    # alternatives rate-limit at ~10 req/min, a bottleneck for 600+ rows.
-    judge = OpenAILLM(model=JUDGE_MODEL)
 
-    with Pipeline(name="nice-synthetic-qa") as pipeline:
-        load_seeds_step = LoadDataFromDicts(name="load_seeds", data=seeds)
-
+def run_question_phase(todo: list[dict]) -> list[dict]:
+    """Generate questions for seeds not yet in the bank; returns bank rows."""
+    with Pipeline(name="nice-synthetic-questions") as pipeline:
+        load = LoadDataFromDicts(name="load_seeds", data=todo)
         generate_question = TextGeneration(
             name="generate_question",
-            llm=teacher,
+            llm=_make_llm(TEACHER_PROVIDER, TEACHER_MODEL),
             system_prompt=QUESTION_SYSTEM_PROMPT,
             input_mappings={"instruction": "question_prompt"},
             output_mappings={"generation": "clinical_question"},
             input_batch_size=QUESTION_BATCH_SIZE,
         )
+        load >> generate_question
 
-        build_answer_prompt = BuildAnswerPrompt(name="build_answer_prompt")
+    # use_cache=False: the cache-resume path crashes multiprocess pool startup
+    # on Python 3.12.0 ("OSError: handle is closed"). The bank file is our
+    # resume mechanism instead.
+    rows = _distiset_rows(pipeline.run(use_cache=False))
+    banked = []
+    for r in rows:
+        question = (r.get("clinical_question") or "").strip()
+        if not question:
+            continue  # failed generation: leave un-banked so a rerun retries it
+        banked.append({
+            "guideline_id": r["guideline_id"],
+            "title": r["title"],
+            "section": r["section"],
+            "text": r["text"],
+            "aspect": r["aspect"],
+            "clinical_question": question,
+            "question_model": TEACHER_MODEL,
+            "salvaged_from": "generated",
+        })
+    return banked
 
+
+def run_answer_phase(todo: list[dict]) -> list[dict]:
+    """Answer + judge + filter banked questions; returns quality-passing rows."""
+    for row in todo:
+        row["instruction"] = build_instruction(row)
+
+    with Pipeline(name="nice-synthetic-answers") as pipeline:
+        load = LoadDataFromDicts(name="load_questions", data=todo)
         generate_answer = TextGeneration(
             name="generate_answer",
-            llm=teacher,
+            llm=_make_llm(TEACHER_PROVIDER, TEACHER_MODEL, max_new_tokens=1024),
             system_prompt=SYSTEM_PROMPT,
             num_generations=1,
             group_generations=True,
             output_mappings={"generation": "generations"},
             input_batch_size=ANSWER_BATCH_SIZE,
         )
-
+        drop_failed = DropFailedGenerations(name="drop_failed")
         judge_step = UltraFeedback(
             name="judge",
             aspect="overall-rating",
-            llm=judge,
+            llm=_make_llm(JUDGE_PROVIDER, JUDGE_MODEL),
             input_batch_size=JUDGE_BATCH_SIZE,
         )
-
         dedup = MinHashDedup(
             name="dedup",
             threshold=MINHASH_THRESHOLD,
             input_mappings={"text": "clinical_question"},
         )
-
         filter_step = FilterLowQuality(name="filter_low_quality")
 
-        (
-            load_seeds_step
-            >> generate_question
-            >> build_answer_prompt
-            >> generate_answer
-            >> judge_step
-            >> dedup
-            >> filter_step
-        )
+        load >> generate_answer >> drop_failed >> judge_step >> dedup >> filter_step
 
-    return pipeline
+    return _distiset_rows(pipeline.run(use_cache=False))
 
 
-def main(limit: int | None = 50) -> None:
-    """Generate synthetic QA pairs from a slice of NICE seeds (default: 50)."""
-    seeds = expand_seeds(load_seeds(limit=limit))
-    pipeline = build_pipeline(seeds)
-    # use_cache=False: the cache-resume path crashes multiprocess pool startup
-    # on Python 3.12.0 ("OSError: handle is closed"). Revisit after a Python
-    # upgrade -- resume support is worth having back.
-    distiset = pipeline.run(use_cache=False)
-
-    if not distiset:
-        print("Pipeline produced no output (all rows filtered or a step failed).")
-        return
-
-    leaf_dataset = next(iter(distiset.values()))
-    rows = leaf_dataset["default"] if "default" in leaf_dataset else next(iter(leaf_dataset.values()))
-
+def append_output(rows: list[dict], start_index: int) -> None:
+    """Append new QA pairs to the dataset; existing rows are never rewritten."""
     generated_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
     OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(OUTPUT_PATH, "w", encoding="utf-8") as f:
-        for i, row in enumerate(rows):
+    with open(OUTPUT_PATH, "a", encoding="utf-8") as f:
+        for i, row in enumerate(rows, start=start_index):
             f.write(json.dumps({
                 "id": f"nice_{row['guideline_id']}_{i:05d}",
                 "instruction": row["clinical_question"],
@@ -303,14 +380,47 @@ def main(limit: int | None = 50) -> None:
                     "task_type": row["aspect"],
                     "quality_rating": _rating_of(row),
                     "teacher_model": TEACHER_MODEL,
+                    "question_model": row.get("question_model", TEACHER_MODEL),
                     "judge_model": JUDGE_MODEL,
                     "prompt_version": PROMPT_VERSION,
                     "generated_at": generated_at,
                 },
             }, ensure_ascii=False) + "\n")
 
-    print(f"Wrote {len(rows)} synthetic QA pairs to {OUTPUT_PATH}")
+
+def main(limit: int | None = None) -> None:
+    """Generate synthetic QA pairs from NICE seeds, resuming past work."""
+    seeds = expand_seeds(load_seeds(limit=limit))
+    bank = load_bank()
+    done, next_index = load_done()
+    print(
+        f"providers: teacher={TEACHER_PROVIDER}/{TEACHER_MODEL} "
+        f"judge={JUDGE_PROVIDER}/{JUDGE_MODEL}"
+    )
+    print(f"seeds expanded: {len(seeds)} | banked questions: {len(bank)} | done rows: {len(done)}")
+
+    todo_questions = [s for s in seeds if _key(s) not in bank and _key(s) not in done]
+    if todo_questions:
+        print(f"phase 1: generating {len(todo_questions)} questions")
+        new_bank_rows = run_question_phase(todo_questions)
+        append_bank(new_bank_rows)
+        bank.update({_key(r): r for r in new_bank_rows})
+        print(f"phase 1: banked {len(new_bank_rows)} new questions")
+    else:
+        print("phase 1: nothing to do, all questions banked")
+
+    todo_answers = [dict(row) for key, row in bank.items() if key not in done]
+    if not todo_answers:
+        print("phase 2: nothing to do, all banked questions answered")
+        return
+    print(f"phase 2: answering {len(todo_answers)} questions")
+    kept = run_answer_phase(todo_answers)
+    append_output(kept, start_index=next_index)
+    print(
+        f"phase 2: {len(kept)}/{len(todo_answers)} passed quality; "
+        f"dataset now {next_index + len(kept)} rows at {OUTPUT_PATH}"
+    )
 
 
 if __name__ == "__main__":
-    main()
+    main(limit=None)
