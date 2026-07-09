@@ -1,0 +1,16 @@
+base_model: meta-llama/Llama-3.1-8B-Instruct
+dataset_repo: Divyansh619/medscriptai-sft
+max_seq_length: 2048
+
+lora_rank: 16
+lora_alpha: 32
+lora_dropout: 0.05
+target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+
+batch_size: 4
+grad_accum: 4
+learning_rate: 0.0002
+epochs: 2
+
+output_dir: adapter_sft
+mlflow_experiment: fine-tuning
