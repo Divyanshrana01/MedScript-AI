@@ -14,3 +14,6 @@ epochs: 2
 
 output_dir: adapter_sft
 mlflow_experiment: fine-tuning
+
+save_steps: 100
+save_total_limit: 2

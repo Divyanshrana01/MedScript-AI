@@ -17,9 +17,12 @@ free costs nothing; the same break two hours into a paid A100 run doesn't.
 
 from unsloth import FastLanguageModel
 
+import os
+
 import mlflow
 import yaml
 from datasets import load_dataset
+from transformers.trainer_utils import get_last_checkpoint
 from trl import SFTConfig, SFTTrainer
 
 from mlflow_utils import start_run
@@ -68,8 +71,14 @@ with start_run(cfg):
             num_train_epochs=cfg["epochs"],
             optim="paged_adamw_8bit",
             eval_strategy="epoch",
+            save_strategy="steps",
+            save_steps=cfg["save_steps"],
+            save_total_limit=cfg["save_total_limit"],
         ),
     )
-    trainer.train()
+    last_checkpoint = (
+        get_last_checkpoint(cfg["output_dir"]) if os.path.isdir(cfg["output_dir"]) else None
+    )
+    trainer.train(resume_from_checkpoint=last_checkpoint)
     model.save_pretrained(cfg["output_dir"])
     mlflow.log_artifacts(cfg["output_dir"])
