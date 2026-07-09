@@ -42,6 +42,18 @@ model = FastLanguageModel.get_peft_model(
 train_dataset = load_dataset(cfg["dataset_repo"], split="train")
 eval_dataset = load_dataset(cfg["dataset_repo"], split="validation")
 
+
+def formatting_prompts_func(examples):
+    texts = [
+        tokenizer.apply_chat_template(convo, tokenize=False, add_generation_prompt=False)
+        for convo in examples["messages"]
+    ]
+    return {"text": texts}
+
+
+train_dataset = train_dataset.map(formatting_prompts_func, batched=True)
+eval_dataset = eval_dataset.map(formatting_prompts_func, batched=True)
+
 with start_run(cfg):
     trainer = SFTTrainer(
         model=model,
