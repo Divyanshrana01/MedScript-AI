@@ -11,7 +11,10 @@ import random
 from pathlib import Path
 
 from datasets import Dataset, DatasetDict
+from dotenv import load_dotenv
 from huggingface_hub import HfApi
+
+load_dotenv()
 
 PROCESSED_PATH = Path("data/processed/train.jsonl")
 HUB_REPO = "Divyansh619/medscriptai-sft"
