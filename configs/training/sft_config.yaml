@@ -13,6 +13,7 @@ learning_rate: 0.0002
 epochs: 2
 
 output_dir: adapter_sft
+adapter_hub_repo: Divyansh619/medscriptai-sft-adapter
 mlflow_experiment: fine-tuning
 
 save_steps: 100

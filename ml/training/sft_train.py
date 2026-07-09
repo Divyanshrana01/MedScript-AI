@@ -82,3 +82,5 @@ with start_run(cfg):
     trainer.train(resume_from_checkpoint=last_checkpoint)
     model.save_pretrained(cfg["output_dir"])
     mlflow.log_artifacts(cfg["output_dir"])
+    model.push_to_hub(cfg["adapter_hub_repo"], private=True)
+    tokenizer.push_to_hub(cfg["adapter_hub_repo"], private=True)
