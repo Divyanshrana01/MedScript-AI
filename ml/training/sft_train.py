@@ -15,11 +15,12 @@ P100) before the full run on paid Colab Pro compute -- a broken config caught
 free costs nothing; the same break two hours into a paid A100 run doesn't.
 """
 
+from unsloth import FastLanguageModel
+
 import mlflow
 import yaml
 from datasets import load_dataset
 from trl import SFTConfig, SFTTrainer
-from unsloth import FastLanguageModel
 
 from mlflow_utils import start_run
 

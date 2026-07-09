@@ -10,6 +10,8 @@ Extra deps beyond training (install alongside unsloth/trl in Colab):
 pip install evaluate rouge_score bert_score
 """
 
+from unsloth import FastLanguageModel
+
 import os
 
 import mlflow
@@ -17,7 +19,6 @@ import yaml
 from datasets import load_dataset
 from dotenv import load_dotenv
 from evaluate import load as load_metric
-from unsloth import FastLanguageModel
 
 load_dotenv()
 mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000"))
