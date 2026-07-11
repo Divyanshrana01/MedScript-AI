@@ -2,9 +2,16 @@
 
 A Clinical Decision Support System combining a QLoRA/DPO fine-tuned Llama-3.1-8B, hybrid BM25 + dense RAG over NICE/NHS clinical guidelines, and a LangGraph multi-agent backend (Supervisor, Clinical QA, Literature Retrieval).
 
-Built for a UK/NHS clinical context (NICE guidelines, BNF terminology) as an MSc AI portfolio project.
+Built for a UK/NHS clinical context (NICE guidelines, BNF terminology).
 
-> Status: Week 1 — repo scaffolding + data pipeline in progress. Architecture diagram, evaluation results, and demo link will land here as the corresponding build weeks complete.
+> Status: Data pipeline + QLoRA SFT complete. DPO up next. Architecture diagram and demo link will land here as later stages complete.
+
+## Progress
+
+- **Data pipeline** — 10,768-row SFT dataset (590 synthetic NICE QA pairs + 10,178 MedQA, 95/5 train/val split) live on HF Hub: [`Divyansh619/medscriptai-sft`](https://huggingface.co/datasets/Divyansh619/medscriptai-sft) (private).
+- **SFT (QLoRA)** — `meta-llama/Llama-3.1-8B-Instruct`, LoRA rank 16, 2 epochs, trained via Unsloth + TRL on Kaggle T4. `train_loss: 1.067`. Adapter on HF Hub: [`Divyansh619/medscriptai-sft-adapter`](https://huggingface.co/Divyansh619/medscriptai-sft-adapter) (private).
+- **Eval** (held-out validation split): `rougeL: 0.2315`, `bertscore_f1: 0.9003`.
+- **Next** — DPO training on top of the SFT adapter.
 
 ## Repository layout
 
