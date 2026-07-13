@@ -6,28 +6,32 @@ sft_adapter_repo: Divyansh619/medscriptai-sft-adapter
 max_seq_length: 2048
 
 # --- preference set (preference_dataset.py) ---
-# chosen = existing gpt-4o gold from the synthetic pairs; rejected = the SFT
-# adapter sampled hot on the same prompt; a judge keeps only pairs where chosen
-# clearly beats rejected. Safety-sensitive aspects only, per the Week 3 scope.
-# The synthetic pairs carry the task_type metadata the safety filter needs, so
-# they load from a private hub dataset (Kaggle can't see the gitignored local
-# file); synthetic_pairs_path is the local fallback for dev on this machine.
+# Fully on-policy pairs: n_samples come from the SFT adapter per safety prompt,
+# the judge scores each, best = chosen / worst = rejected, and the pair is kept
+# only when the margin is >= pair_margin. Earlier gold-as-chosen builds
+# displaced the model's own outputs instead of teaching preference (the gold
+# was far off-policy AND memorised from SFT training). Safety aspects only,
+# per the Week 3 scope. Prompts load from the private hub dataset (Kaggle
+# can't see the gitignored local jsonl); synthetic_pairs_path is the dev
+# fallback on this machine.
 nice_qa_repo: Divyansh619/medscriptai-nice-qa
 synthetic_pairs_path: data/synthetic/qa_pairs.jsonl
 dpo_dataset_repo: Divyansh619/medscriptai-dpo
+# eval questions live in their own repo: they have no chosen/rejected columns,
+# and the hub rejects splits whose features differ within one dataset
+dpo_eval_repo: Divyansh619/medscriptai-dpo-eval
 safety_aspects:
   - emergency or urgent management
   - medication safety and contraindications
   - follow-up, monitoring and referral decisions
-# temp 1.0 / 400 tokens: the first run's temp-1.2, 800-token rejected samples
-# came out ~2x longer than the gold chosen, so DPO mostly learned "be shorter"
-# instead of "be safer" -- keep rejected roughly length-matched to chosen.
-sample_temperature: 1.0
+n_samples: 4
+sample_temperature: 0.9
 sample_max_new_tokens: 400
 judge_model: gpt-4o-mini
-judge_margin: 1  # chosen must outscore rejected by at least this (1-10 rubric)
-# held out from DPO training, used by eval_dpo.py as in-domain eval prompts
-eval_holdout: 32
+pair_margin: 3  # best must outscore worst by this (1-10 rubric) or the pair is dropped
+# fresh eval questions (gen_eval_questions.py): unused section x safety-aspect
+# combos, never seen in SFT or DPO training data
+eval_size: 40
 
 # --- DPO training (dpo_train.py) ---
 # The SFT adapter is merged into a frozen base so TRL's implicit PEFT
@@ -64,8 +68,9 @@ save_steps: 50
 save_total_limit: 2
 
 # --- eval (eval_dpo.py) ---
-# Win rate = judge preferring DPO over SFT on the held-out safety prompts (the
-# DPO target domain -- the first run evaluated on the MedQA-heavy validation
-# split and punished the style shift DPO was trained to make). Safety rate is
-# logged for BOTH models so the DPO number has a baseline.
+# Win rate = judge preferring DPO over SFT on the fresh eval questions. Those
+# must be unseen by BOTH models: an earlier eval reused prompts whose gold
+# answers were in SFT's training data, so SFT "won" by reciting memorised
+# answers. Safety rate is logged for both models so the DPO number has a
+# baseline.
 eval_max_new_tokens: 800

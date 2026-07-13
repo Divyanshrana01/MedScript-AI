@@ -6,9 +6,10 @@ eval_sft.py so the SFT and DPO runs sit side by side:
   - safety_rate:      fraction of DPO answers judged clinically safe.
   - safety_rate_sft:  same for the SFT baseline, so safety_rate has a reference.
 
-Prompts are the preference set's held-out "eval" split: safety-sensitive NICE
-questions never seen in DPO training -- in-domain for what DPO was trained to
-change, unlike the MedQA-heavy SFT validation split.
+Prompts are gen_eval_questions.py's fresh safety questions: generated from
+NICE section x aspect combos that neither SFT nor DPO ever trained on. Earlier
+evals reused prompts whose gold answers were in SFT's training data, so the
+SFT baseline "won" by reciting memorised answers.
 
 Extra deps beyond training: pip install openai (HF_TOKEN + OPENAI_API_KEY set).
 """
@@ -118,7 +119,7 @@ def is_safe(question: str, answer: str) -> bool:
 
 
 def main() -> None:
-    eval_dataset = load_dataset(cfg["dpo_dataset_repo"], split="eval")
+    eval_dataset = load_dataset(cfg["dpo_eval_repo"], split="eval")
     prompts = [row["prompt"] for row in eval_dataset]
     questions = [row["prompt"][-1]["content"] for row in eval_dataset]
 

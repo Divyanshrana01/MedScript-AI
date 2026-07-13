@@ -1,28 +1,28 @@
-"""Build the DPO preference set: (prompt, chosen, rejected) triples.
+"""Build the DPO preference set: fully on-policy (prompt, chosen, rejected).
 
-chosen is the existing gpt-4o gold answer from the synthetic NICE pairs;
-rejected is the SFT adapter sampled hot on the same prompt (on-policy, so DPO's
-gradient learns preference rather than model mismatch). A judge then keeps only
-pairs where chosen clearly beats rejected, dropping ties where the SFT sample is
-already as good as the gold -- those carry no usable preference signal.
+For each safety-sensitive prompt, sample n_samples from the SFT adapter in one
+batched generate, have a judge score each 1-10, and pair the best (chosen)
+against the worst (rejected) -- keeping the pair only when the margin is >=
+pair_margin, so every surviving pair carries real contrast. Both sides come
+from the policy itself: earlier gold-as-chosen builds pushed probability away
+from the model's own outputs without a reachable target (the gold was far
+off-policy) and made the model worse with every step.
 
-Restricted to safety-sensitive prompts (emergency, medication safety, referral)
-per the Week 3 scope. Runs in a Colab/Kaggle GPU session (needs the SFT model to
-sample); the judge calls OpenAI, so set OPENAI_API_KEY alongside HF_TOKEN.
+Runs in a Colab/Kaggle GPU session (needs the SFT model to sample); the judge
+calls OpenAI, so set OPENAI_API_KEY alongside HF_TOKEN.
 
-Resume-aware: every kept/rejected prompt id is recorded, so a crashed or rerun
-job never re-samples or re-judges a prompt it already handled.
+Resume-aware: every handled prompt id is recorded in the output jsonl, so a
+crashed or rerun job never re-samples or re-judges a prompt it already did.
 """
 
 from unsloth import FastLanguageModel
 
 import json
 import os
-import random
 from pathlib import Path
 
 import yaml
-from datasets import Dataset, DatasetDict, load_dataset
+from datasets import Dataset, load_dataset
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -30,18 +30,18 @@ load_dotenv()
 
 cfg = yaml.safe_load(open("configs/training/dpo_config.yaml"))
 
-# Match the system prompt the model was SFT-trained and is served behind, so the
-# sampled rejected response comes from the same conditioning as production.
+# Match the system prompt the model was SFT-trained and is served behind, so
+# sampling happens under the same conditioning as production.
 SYSTEM_PROMPT = "You are a clinical decision support assistant trained on NICE guidelines."
 
 PAIRS_PATH = Path(cfg["synthetic_pairs_path"])
-OUTPUT_PATH = Path("data/synthetic/dpo_pairs.jsonl")
+OUTPUT_PATH = Path("data/synthetic/dpo_pairs_onpolicy.jsonl")
 SAFETY_ASPECTS = set(cfg["safety_aspects"])
 
-JUDGE_SYSTEM_PROMPT = """You are grading two answers to a UK clinical question
-for safety and correctness against NICE guidance. Rate each answer 1-10 on
-clinical safety, correctness, and appropriate escalation/referral. Reply with
-ONLY strict JSON: {"chosen": <int>, "rejected": <int>}. No prose."""
+JUDGE_SYSTEM_PROMPT = """You are grading candidate answers to a UK clinical
+question on clinical safety, correctness, and appropriate escalation/referral
+against NICE guidance. Score each answer 1-10. Reply with ONLY strict JSON:
+{"scores": [<int>, ...]} -- one score per answer, in the order given."""
 
 client = OpenAI()
 
@@ -60,75 +60,70 @@ def _iter_qa_rows() -> list[dict]:
 
 
 def load_safety_prompts() -> list[dict]:
-    """QA rows whose task_type is a safety-sensitive aspect.
-
-    Each yields a prompt id (for resume), the question, and the gpt-4o gold
-    answer used as the DPO 'chosen'.
-    """
+    """QA rows whose task_type is a safety-sensitive aspect (id + question only)."""
     rows = []
     for qa in _iter_qa_rows():
         if qa["metadata"]["task_type"] not in SAFETY_ASPECTS:
             continue
-        rows.append({"id": qa["id"], "question": qa["instruction"], "chosen": qa["response"]})
+        rows.append({"id": qa["id"], "question": qa["instruction"]})
     return rows
 
 
 def load_done() -> set[str]:
-    """Prompt ids already emitted, so reruns skip them."""
+    """Prompt ids already handled (kept or dropped), so reruns skip them."""
     if not OUTPUT_PATH.exists():
         return set()
     return {json.loads(line)["id"] for line in OUTPUT_PATH.read_text().splitlines() if line}
 
 
-def sample_rejected(model, tokenizer, question: str) -> str:
-    """Sample one hot, on-policy response from the SFT model for `question`."""
+def sample_candidates(model, tokenizer, question: str) -> list[str]:
+    """One batched generate returning n_samples on-policy candidate answers."""
     messages = [
         {"role": "system", "content": SYSTEM_PROMPT},
         {"role": "user", "content": question},
     ]
     prompt = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     inputs = tokenizer(prompt, return_tensors="pt").to(model.device)
-    output = model.generate(
+    outputs = model.generate(
         **inputs,
         do_sample=True,
         temperature=cfg["sample_temperature"],
         max_new_tokens=cfg["sample_max_new_tokens"],
+        num_return_sequences=cfg["n_samples"],
     )
-    return tokenizer.decode(
-        output[0][inputs["input_ids"].shape[1] :], skip_special_tokens=True
-    ).strip()
+    prompt_len = inputs["input_ids"].shape[1]
+    return [
+        tokenizer.decode(out[prompt_len:], skip_special_tokens=True).strip() for out in outputs
+    ]
 
 
-def judge_keeps(question: str, chosen: str, rejected: str) -> bool:
-    """True if the judge scores chosen above rejected by at least judge_margin.
-
-    A parse failure or a non-positive margin drops the pair -- better a smaller,
-    clean preference set than a noisy one.
-    """
-    user = (
-        f"Question:\n{question}\n\n"
-        f"Answer CHOSEN:\n{chosen}\n\nAnswer REJECTED:\n{rejected}"
-    )
+def judge_scores(question: str, candidates: list[str]) -> list[int] | None:
+    """Score every candidate in one judge call; None if the reply can't be parsed."""
+    numbered = "\n\n".join(f"Answer {i + 1}:\n{c}" for i, c in enumerate(candidates))
     resp = client.chat.completions.create(
         model=cfg["judge_model"],
         messages=[
             {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
-            {"role": "user", "content": user},
+            {"role": "user", "content": f"Question:\n{question}\n\n{numbered}"},
         ],
         response_format={"type": "json_object"},
         temperature=0,
     )
     try:
-        scores = json.loads(resp.choices[0].message.content)
-        return int(scores["chosen"]) - int(scores["rejected"]) >= cfg["judge_margin"]
+        scores = json.loads(resp.choices[0].message.content)["scores"]
+        if len(scores) != len(candidates):
+            return None
+        return [int(s) for s in scores]
     except (json.JSONDecodeError, KeyError, ValueError, TypeError):
-        return False
+        return None
 
 
-def to_preference_record(prompt_id: str, question: str, chosen: str, rejected: str) -> dict:
-    """TRL conversational preference format: explicit prompt, per-side completions."""
+def to_record(prompt_id: str, question: str, chosen: str, rejected: str, margin: int) -> dict:
+    """TRL conversational preference format; kept=False rows are resume markers."""
     return {
         "id": prompt_id,
+        "kept": True,
+        "margin": margin,
         "prompt": [
             {"role": "system", "content": SYSTEM_PROMPT},
             {"role": "user", "content": question},
@@ -139,7 +134,7 @@ def to_preference_record(prompt_id: str, question: str, chosen: str, rejected: s
 
 
 def main() -> None:
-    """Sample rejected answers, judge-gate against gold, append kept triples."""
+    """Sample, judge, pair best-vs-worst, append kept pairs, push the train split."""
     prompts = load_safety_prompts()
     done = load_done()
     todo = [p for p in prompts if p["id"] not in done]
@@ -156,32 +151,35 @@ def main() -> None:
     kept = 0
     with open(OUTPUT_PATH, "a", encoding="utf-8") as f:
         for i, p in enumerate(todo, 1):
-            rejected = sample_rejected(model, tokenizer, p["question"])
-            if not rejected or not judge_keeps(p["question"], p["chosen"], rejected):
-                continue
-            record = to_preference_record(p["id"], p["question"], p["chosen"], rejected)
+            candidates = sample_candidates(model, tokenizer, p["question"])
+            scores = judge_scores(p["question"], candidates)
+            if scores is None:
+                continue  # unparsable judge reply: leave un-done so a rerun retries
+            best, worst = max(range(len(scores)), key=scores.__getitem__), min(
+                range(len(scores)), key=scores.__getitem__
+            )
+            margin = scores[best] - scores[worst]
+            if margin >= cfg["pair_margin"] and candidates[best] and candidates[worst]:
+                record = to_record(
+                    p["id"], p["question"], candidates[best], candidates[worst], margin
+                )
+                kept += 1
+            else:
+                # low contrast: record the id so reruns skip it, but train won't see it
+                record = {"id": p["id"], "kept": False, "margin": margin}
             f.write(json.dumps(record, ensure_ascii=False) + "\n")
             f.flush()  # survive a mid-run crash; the file is the resume state
-            kept += 1
             if i % 20 == 0:
-                print(f"{i}/{len(todo)} processed, {kept} kept")
+                print(f"{i}/{len(todo)} processed, {kept} kept this run")
 
     records = [json.loads(line) for line in OUTPUT_PATH.read_text().splitlines() if line]
-    # Hold out eval prompts BEFORE training ever sees them -- the first run
-    # trained on all pairs and had to eval out-of-domain. Seeded shuffle keeps
-    # the split stable across reruns.
-    random.Random(42).shuffle(records)
-    holdout = cfg["eval_holdout"]
-    splits = DatasetDict({
-        "train": Dataset.from_list(records[holdout:]),
-        "eval": Dataset.from_list(records[:holdout]),
-    })
-    print(
-        f"preference set: {len(records)} pairs "
-        f"({len(records) - holdout} train / {holdout} eval) -> {cfg['dpo_dataset_repo']}"
-    )
-    # Private, like the SFT dataset: derived from NICE guideline text.
-    splits.push_to_hub(cfg["dpo_dataset_repo"], private=True)
+    pairs = [
+        {k: r[k] for k in ("id", "prompt", "chosen", "rejected")} for r in records if r["kept"]
+    ]
+    print(f"preference set: {len(pairs)} pairs from {len(records)} prompts -> pushing train split")
+    # Private, like the SFT dataset: derived from NICE guideline text. The eval
+    # split is pushed separately by ml/evaluation/gen_eval_questions.py.
+    Dataset.from_list(pairs).push_to_hub(cfg["dpo_dataset_repo"], split="train", private=True)
 
 
 if __name__ == "__main__":
