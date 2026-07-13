@@ -79,7 +79,7 @@ def dpo_answers_for(prompts: list[list[dict]]) -> list[str]:
     sft, tok = FastLanguageModel.from_pretrained(
         model_name=cfg["sft_adapter_repo"], max_seq_length=cfg["max_seq_length"], load_in_4bit=True
     )
-    sft.save_pretrained_merged(cfg["merged_sft_dir"], tok, save_method="merged_4bit")
+    sft.save_pretrained_merged(cfg["merged_sft_dir"], tok, save_method="merged_16bit")
     del sft
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=cfg["adapter_hub_repo"], max_seq_length=cfg["max_seq_length"], load_in_4bit=True

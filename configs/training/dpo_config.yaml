@@ -25,10 +25,12 @@ judge_model: gpt-4o-mini
 judge_margin: 1  # chosen must outscore rejected by at least this (1-10 rubric)
 
 # --- DPO training (dpo_train.py) ---
-# The SFT adapter is merged into a frozen 4-bit base so TRL's implicit PEFT
+# The SFT adapter is merged into a frozen base so TRL's implicit PEFT
 # reference (adapter disabled) is the SFT model, not the raw base -- a fresh
-# LoRA on top is the trainable DPO policy.
-merged_sft_dir: merged_sft
+# LoRA on top is the trainable DPO policy. Merged in 16bit (unsloth's 4bit
+# merge path errors out) and kept in /tmp so the ~16GB dir never lands in the
+# notebook's persisted output.
+merged_sft_dir: /tmp/merged_sft
 lora_rank: 16
 lora_alpha: 32
 lora_dropout: 0.05

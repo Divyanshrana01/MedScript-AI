@@ -7,9 +7,10 @@ kernels).
 
 Making the SFT adapter the frozen reference: TRL's PEFT integration uses the
 model with its adapter disabled as the implicit reference, which would be the
-raw base. So the SFT adapter is merged into a 4-bit base first (Unsloth blesses
-merged_4bit for exactly this DPO case); a fresh LoRA on top is the trainable
-policy, and the disabled-adapter reference is then the SFT model, not the base.
+raw base. So the SFT adapter is merged into the base first (16bit merge --
+unsloth's merged_4bit path raises, and merged_4bit_forced is buggy -- then
+requantized to 4bit on reload); a fresh LoRA on top is the trainable policy,
+and the disabled-adapter reference is then the SFT model, not the base.
 
 Checkpoints every save_steps and auto-resumes -- ephemeral notebook sessions
 disconnect, and DPO shouldn't restart from zero when they do.
@@ -31,7 +32,7 @@ from mlflow_utils import start_run
 
 cfg = yaml.safe_load(open("configs/training/dpo_config.yaml"))
 
-# Merge SFT into a frozen 4-bit base, then reload it as the DPO base. After this
+# Merge SFT into a frozen base, then reload it 4-bit as the DPO base. After this
 # the SFT weights live in the (frozen) base, so the fresh LoRA below is the only
 # trainable part and the adapter-disabled reference is the SFT model.
 sft_model, tokenizer = FastLanguageModel.from_pretrained(
@@ -39,7 +40,7 @@ sft_model, tokenizer = FastLanguageModel.from_pretrained(
     max_seq_length=cfg["max_seq_length"],
     load_in_4bit=True,
 )
-sft_model.save_pretrained_merged(cfg["merged_sft_dir"], tokenizer, save_method="merged_4bit")
+sft_model.save_pretrained_merged(cfg["merged_sft_dir"], tokenizer, save_method="merged_16bit")
 del sft_model
 
 model, tokenizer = FastLanguageModel.from_pretrained(
