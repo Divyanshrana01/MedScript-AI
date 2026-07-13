@@ -1,0 +1,58 @@
+# DPO on top of the SFT adapter. Consumed by ml/training/preference_dataset.py,
+# ml/training/dpo_train.py, and ml/evaluation/eval_dpo.py.
+
+base_model: meta-llama/Llama-3.1-8B-Instruct
+sft_adapter_repo: Divyansh619/medscriptai-sft-adapter
+max_seq_length: 2048
+
+# --- preference set (preference_dataset.py) ---
+# chosen = existing gpt-4o gold from the synthetic pairs; rejected = the SFT
+# adapter sampled hot on the same prompt; a judge keeps only pairs where chosen
+# clearly beats rejected. Safety-sensitive aspects only, per the Week 3 scope.
+# The synthetic pairs carry the task_type metadata the safety filter needs, so
+# they load from a private hub dataset (Kaggle can't see the gitignored local
+# file); synthetic_pairs_path is the local fallback for dev on this machine.
+nice_qa_repo: Divyansh619/medscriptai-nice-qa
+synthetic_pairs_path: data/synthetic/qa_pairs.jsonl
+dpo_dataset_repo: Divyansh619/medscriptai-dpo
+safety_aspects:
+  - emergency or urgent management
+  - medication safety and contraindications
+  - follow-up, monitoring and referral decisions
+sample_temperature: 1.2
+sample_max_new_tokens: 800
+judge_model: gpt-4o-mini
+judge_margin: 1  # chosen must outscore rejected by at least this (1-10 rubric)
+
+# --- DPO training (dpo_train.py) ---
+# The SFT adapter is merged into a frozen 4-bit base so TRL's implicit PEFT
+# reference (adapter disabled) is the SFT model, not the raw base -- a fresh
+# LoRA on top is the trainable DPO policy.
+merged_sft_dir: merged_sft
+lora_rank: 16
+lora_alpha: 32
+lora_dropout: 0.05
+target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+
+beta: 0.1
+learning_rate: 0.000005
+epochs: 1
+batch_size: 1
+grad_accum: 8
+# DPO holds chosen+rejected in memory at once; cap lengths so a pair fits on a T4.
+max_length: 1024
+max_prompt_length: 512
+
+output_dir: adapter_dpo
+adapter_hub_repo: Divyansh619/medscriptai-dpo-adapter
+mlflow_experiment: fine-tuning
+
+save_steps: 50
+save_total_limit: 2
+
+# --- eval (eval_dpo.py) ---
+# Win rate = judge preferring DPO over SFT on the SFT dataset's held-out
+# validation split; safety rate = judge marking the DPO answer clinically safe.
+sft_dataset_repo: Divyansh619/medscriptai-sft
+eval_prompts: 60
+eval_max_new_tokens: 800
