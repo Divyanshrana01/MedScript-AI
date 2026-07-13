@@ -18,10 +18,11 @@ from unsloth import FastLanguageModel
 
 import json
 import os
+import random
 from pathlib import Path
 
 import yaml
-from datasets import Dataset, load_dataset
+from datasets import Dataset, DatasetDict, load_dataset
 from dotenv import load_dotenv
 from openai import OpenAI
 
@@ -166,9 +167,21 @@ def main() -> None:
                 print(f"{i}/{len(todo)} processed, {kept} kept")
 
     records = [json.loads(line) for line in OUTPUT_PATH.read_text().splitlines() if line]
-    print(f"preference set: {len(records)} pairs -> pushing to {cfg['dpo_dataset_repo']}")
+    # Hold out eval prompts BEFORE training ever sees them -- the first run
+    # trained on all pairs and had to eval out-of-domain. Seeded shuffle keeps
+    # the split stable across reruns.
+    random.Random(42).shuffle(records)
+    holdout = cfg["eval_holdout"]
+    splits = DatasetDict({
+        "train": Dataset.from_list(records[holdout:]),
+        "eval": Dataset.from_list(records[:holdout]),
+    })
+    print(
+        f"preference set: {len(records)} pairs "
+        f"({len(records) - holdout} train / {holdout} eval) -> {cfg['dpo_dataset_repo']}"
+    )
     # Private, like the SFT dataset: derived from NICE guideline text.
-    Dataset.from_list(records).push_to_hub(cfg["dpo_dataset_repo"], private=True)
+    splits.push_to_hub(cfg["dpo_dataset_repo"], private=True)
 
 
 if __name__ == "__main__":

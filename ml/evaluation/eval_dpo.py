@@ -1,16 +1,14 @@
-"""Score the DPO adapter against the SFT baseline: win rate + safety rate.
+"""Score the DPO adapter against the SFT baseline: win rate + safety rates.
 
-Two metrics, both from a GPT-4o judge, logged to the same "fine-tuning" MLflow
-experiment as eval_sft.py so the SFT and DPO runs sit side by side:
-  - win_rate:   fraction of held-out prompts where the judge prefers the DPO
-                answer over the SFT answer (A/B order randomised per prompt to
-                cancel position bias).
-  - safety_rate: fraction of DPO answers the judge marks clinically safe.
+GPT-4o-judged metrics, logged to the same "fine-tuning" MLflow experiment as
+eval_sft.py so the SFT and DPO runs sit side by side:
+  - win_rate:         judge prefers the DPO answer over SFT (A/B randomised).
+  - safety_rate:      fraction of DPO answers judged clinically safe.
+  - safety_rate_sft:  same for the SFT baseline, so safety_rate has a reference.
 
-Runs in the same Colab/Kaggle session as dpo_train.py -- it reloads the DPO
-adapter from its local output dir, whose base is the session's merged_sft dir.
-Prompts are the SFT dataset's held-out validation split (never seen in SFT or
-DPO training), so the numbers measure generalisation, not memorisation.
+Prompts are the preference set's held-out "eval" split: safety-sensitive NICE
+questions never seen in DPO training -- in-domain for what DPO was trained to
+change, unlike the MedQA-heavy SFT validation split.
 
 Extra deps beyond training: pip install openai (HF_TOKEN + OPENAI_API_KEY set).
 """
@@ -120,10 +118,9 @@ def is_safe(question: str, answer: str) -> bool:
 
 
 def main() -> None:
-    eval_dataset = load_dataset(cfg["sft_dataset_repo"], split="validation")
-    eval_dataset = eval_dataset.select(range(min(cfg["eval_prompts"], len(eval_dataset))))
-    prompts = [row["messages"][:-1] for row in eval_dataset]
-    questions = [row["messages"][-2]["content"] for row in eval_dataset]
+    eval_dataset = load_dataset(cfg["dpo_dataset_repo"], split="eval")
+    prompts = [row["prompt"] for row in eval_dataset]
+    questions = [row["prompt"][-1]["content"] for row in eval_dataset]
 
     sft_answers = sft_answers_for(prompts)
     dpo_answers = dpo_answers_for(prompts)
@@ -131,14 +128,19 @@ def main() -> None:
     wins = sum(
         dpo_wins(q, d, s) for q, d, s in zip(questions, dpo_answers, sft_answers)
     )
-    safe = sum(is_safe(q, d) for q, d in zip(questions, dpo_answers))
+    dpo_safe = sum(is_safe(q, d) for q, d in zip(questions, dpo_answers))
+    sft_safe = sum(is_safe(q, s) for q, s in zip(questions, sft_answers))
     n = len(prompts)
 
     mlflow.set_experiment(cfg["mlflow_experiment"])
     with mlflow.start_run(run_name="dpo-eval"):
         mlflow.log_metric("win_rate", wins / n)
-        mlflow.log_metric("safety_rate", safe / n)
-    print(f"win_rate: {wins / n:.4f} | safety_rate: {safe / n:.4f} over {n} prompts")
+        mlflow.log_metric("safety_rate", dpo_safe / n)
+        mlflow.log_metric("safety_rate_sft", sft_safe / n)
+    print(
+        f"win_rate: {wins / n:.4f} | safety_rate: {dpo_safe / n:.4f} "
+        f"| safety_rate_sft: {sft_safe / n:.4f} over {n} prompts"
+    )
 
 
 if __name__ == "__main__":

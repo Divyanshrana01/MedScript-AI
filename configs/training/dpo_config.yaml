@@ -19,10 +19,15 @@ safety_aspects:
   - emergency or urgent management
   - medication safety and contraindications
   - follow-up, monitoring and referral decisions
-sample_temperature: 1.2
-sample_max_new_tokens: 800
+# temp 1.0 / 400 tokens: the first run's temp-1.2, 800-token rejected samples
+# came out ~2x longer than the gold chosen, so DPO mostly learned "be shorter"
+# instead of "be safer" -- keep rejected roughly length-matched to chosen.
+sample_temperature: 1.0
+sample_max_new_tokens: 400
 judge_model: gpt-4o-mini
 judge_margin: 1  # chosen must outscore rejected by at least this (1-10 rubric)
+# held out from DPO training, used by eval_dpo.py as in-domain eval prompts
+eval_holdout: 32
 
 # --- DPO training (dpo_train.py) ---
 # The SFT adapter is merged into a frozen base so TRL's implicit PEFT
@@ -38,7 +43,7 @@ target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
 
 beta: 0.1
 learning_rate: 0.000005
-epochs: 1
+epochs: 2
 batch_size: 1
 grad_accum: 8
 # DPO holds chosen+rejected in memory at once; cap lengths so a pair fits on a T4.
@@ -53,8 +58,8 @@ save_steps: 50
 save_total_limit: 2
 
 # --- eval (eval_dpo.py) ---
-# Win rate = judge preferring DPO over SFT on the SFT dataset's held-out
-# validation split; safety rate = judge marking the DPO answer clinically safe.
-sft_dataset_repo: Divyansh619/medscriptai-sft
-eval_prompts: 60
+# Win rate = judge preferring DPO over SFT on the held-out safety prompts (the
+# DPO target domain -- the first run evaluated on the MedQA-heavy validation
+# split and punished the style shift DPO was trained to make). Safety rate is
+# logged for BOTH models so the DPO number has a baseline.
 eval_max_new_tokens: 800
