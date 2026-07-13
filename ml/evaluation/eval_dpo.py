@@ -44,18 +44,8 @@ question is safe to show a clinician: correct, not misleading, and escalating or
 referring where NICE would. Reply with ONLY 'yes' or 'no'."""
 
 
-def generate_all(model_name: str, prompts: list[list[dict]]) -> list[str]:
-    """Load an adapter, greedily generate a response per prompt, then free it.
-
-    Sequential load-generate-free (not both models resident at once) keeps two
-    8B models off the GPU simultaneously.
-    """
-    model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=model_name,
-        max_seq_length=cfg["max_seq_length"],
-        load_in_4bit=True,
-    )
-    FastLanguageModel.for_inference(model)
+def _generate(model, tokenizer, prompts: list[list[dict]]) -> list[str]:
+    """Greedily generate one response per prompt with an already-loaded model."""
     outputs = []
     for messages in prompts:
         text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -64,8 +54,40 @@ def generate_all(model_name: str, prompts: list[list[dict]]) -> list[str]:
         outputs.append(
             tokenizer.decode(out[0][inputs["input_ids"].shape[1] :], skip_special_tokens=True)
         )
-    del model
     return outputs
+
+
+def sft_answers_for(prompts: list[list[dict]]) -> list[str]:
+    """Generate from the SFT baseline adapter (loaded straight from the hub)."""
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name=cfg["sft_adapter_repo"], max_seq_length=cfg["max_seq_length"], load_in_4bit=True
+    )
+    FastLanguageModel.for_inference(model)
+    answers = _generate(model, tokenizer, prompts)
+    del model
+    return answers
+
+
+def dpo_answers_for(prompts: list[list[dict]]) -> list[str]:
+    """Generate from the DPO adapter, loading it from the hub, not a local dir.
+
+    The hub DPO adapter's config records its base as the local `merged_sft`
+    path from training, so rebuild that frozen merged-SFT base here first (same
+    merge dpo_train did). Keeps eval working in a fresh session, not only right
+    after training. Sequential with the SFT pass so both 8B models never coreside.
+    """
+    sft, tok = FastLanguageModel.from_pretrained(
+        model_name=cfg["sft_adapter_repo"], max_seq_length=cfg["max_seq_length"], load_in_4bit=True
+    )
+    sft.save_pretrained_merged(cfg["merged_sft_dir"], tok, save_method="merged_4bit")
+    del sft
+    model, tokenizer = FastLanguageModel.from_pretrained(
+        model_name=cfg["adapter_hub_repo"], max_seq_length=cfg["max_seq_length"], load_in_4bit=True
+    )
+    FastLanguageModel.for_inference(model)
+    answers = _generate(model, tokenizer, prompts)
+    del model
+    return answers
 
 
 def dpo_wins(question: str, dpo_answer: str, sft_answer: str) -> bool:
@@ -103,8 +125,8 @@ def main() -> None:
     prompts = [row["messages"][:-1] for row in eval_dataset]
     questions = [row["messages"][-2]["content"] for row in eval_dataset]
 
-    sft_answers = generate_all(cfg["sft_adapter_repo"], prompts)
-    dpo_answers = generate_all(cfg["output_dir"], prompts)
+    sft_answers = sft_answers_for(prompts)
+    dpo_answers = dpo_answers_for(prompts)
 
     wins = sum(
         dpo_wins(q, d, s) for q, d, s in zip(questions, dpo_answers, sft_answers)
