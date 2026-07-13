@@ -73,6 +73,7 @@ with start_run(cfg):
             learning_rate=cfg["learning_rate"],
             num_train_epochs=cfg["epochs"],
             beta=cfg["beta"],
+            rpo_alpha=cfg["rpo_alpha"],
             max_length=cfg["max_length"],
             max_prompt_length=cfg["max_prompt_length"],
             optim="paged_adamw_8bit",

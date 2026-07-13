@@ -41,9 +41,15 @@ lora_alpha: 32
 lora_dropout: 0.05
 target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
 
-beta: 0.1
+# beta 0.3 + rpo_alpha: the gold chosen is far off-policy for the SFT model, so
+# plain DPO got almost no usable "raise chosen" gradient and spent the update
+# crushing the model's own outputs (win_rate fell run over run as steps grew).
+# The NLL term (rpo_alpha) turns the chosen arm into real SFT-toward-gold; the
+# higher beta keeps the policy leashed to the SFT reference.
+beta: 0.3
+rpo_alpha: 1.0
 learning_rate: 0.000005
-epochs: 2
+epochs: 1
 batch_size: 1
 grad_accum: 8
 # DPO holds chosen+rejected in memory at once; cap lengths so a pair fits on a T4.
