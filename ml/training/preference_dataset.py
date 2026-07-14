@@ -24,11 +24,29 @@ from pathlib import Path
 import yaml
 from datasets import Dataset, load_dataset
 from dotenv import load_dotenv
+from huggingface_hub import hf_hub_download, snapshot_download
 from openai import OpenAI
 
 load_dotenv()
 
 cfg = yaml.safe_load(open("configs/training/dpo_config.yaml"))
+
+
+def prefetch(adapter_repo: str) -> None:
+    """Warm the HF cache for an adapter and its recorded base model.
+
+    transformers' own file-existence probe intermittently 404s unsloth's
+    mirror repos from Kaggle ("does not appear to have a file named
+    model.safetensors" for a repo that has one); huggingface_hub's downloader
+    is reliable, and with a warm cache transformers resolves files locally.
+    """
+    snapshot_download(adapter_repo)
+    with open(hf_hub_download(adapter_repo, "adapter_config.json")) as f:
+        base = json.load(f)["base_model_name_or_path"]
+    try:
+        snapshot_download(base)
+    except Exception:
+        pass  # base is a local dir (e.g. a merged model) -- nothing to fetch
 
 # Match the system prompt the model was SFT-trained and is served behind, so
 # sampling happens under the same conditioning as production.
@@ -140,6 +158,7 @@ def main() -> None:
     todo = [p for p in prompts if p["id"] not in done]
     print(f"safety prompts: {len(prompts)} | already done: {len(done)} | todo: {len(todo)}")
 
+    prefetch(cfg["sft_adapter_repo"])
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=cfg["sft_adapter_repo"],
         max_seq_length=cfg["max_seq_length"],

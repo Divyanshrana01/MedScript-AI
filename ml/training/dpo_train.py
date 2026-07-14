@@ -20,11 +20,13 @@ from unsloth import FastLanguageModel, PatchDPOTrainer
 
 PatchDPOTrainer()  # must run before DPOTrainer is constructed
 
+import json
 import os
 
 import mlflow
 import yaml
 from datasets import load_dataset
+from huggingface_hub import hf_hub_download, snapshot_download
 from transformers.trainer_utils import get_last_checkpoint
 from trl import DPOConfig, DPOTrainer
 
@@ -32,9 +34,26 @@ from mlflow_utils import start_run
 
 cfg = yaml.safe_load(open("configs/training/dpo_config.yaml"))
 
+
+def prefetch(adapter_repo: str) -> None:
+    """Warm the HF cache for an adapter and its recorded base model.
+
+    transformers' own file-existence probe intermittently 404s unsloth's
+    mirror repos from Kaggle; huggingface_hub's downloader is reliable, and
+    with a warm cache transformers resolves files locally.
+    """
+    snapshot_download(adapter_repo)
+    with open(hf_hub_download(adapter_repo, "adapter_config.json")) as f:
+        base = json.load(f)["base_model_name_or_path"]
+    try:
+        snapshot_download(base)
+    except Exception:
+        pass  # base is a local dir (e.g. a merged model) -- nothing to fetch
+
 # Merge SFT into a frozen base, then reload it 4-bit as the DPO base. After this
 # the SFT weights live in the (frozen) base, so the fresh LoRA below is the only
 # trainable part and the adapter-disabled reference is the SFT model.
+prefetch(cfg["sft_adapter_repo"])
 sft_model, tokenizer = FastLanguageModel.from_pretrained(
     model_name=cfg["sft_adapter_repo"],
     max_seq_length=cfg["max_seq_length"],

@@ -24,12 +24,29 @@ import mlflow
 import yaml
 from datasets import load_dataset
 from dotenv import load_dotenv
+from huggingface_hub import hf_hub_download, snapshot_download
 from openai import OpenAI
 
 load_dotenv()
 mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5000"))
 
 cfg = yaml.safe_load(open("configs/training/dpo_config.yaml"))
+
+
+def prefetch(adapter_repo: str) -> None:
+    """Warm the HF cache for an adapter and its recorded base model.
+
+    transformers' own file-existence probe intermittently 404s unsloth's
+    mirror repos from Kaggle; huggingface_hub's downloader is reliable, and
+    with a warm cache transformers resolves files locally.
+    """
+    snapshot_download(adapter_repo)
+    with open(hf_hub_download(adapter_repo, "adapter_config.json")) as f:
+        base = json.load(f)["base_model_name_or_path"]
+    try:
+        snapshot_download(base)
+    except Exception:
+        pass  # base is a local dir (e.g. the merged SFT) -- nothing to fetch
 EVAL_JUDGE_MODEL = "gpt-4o"  # doc calls for GPT-4o as the DPO judge
 
 client = OpenAI()
@@ -58,6 +75,7 @@ def _generate(model, tokenizer, prompts: list[list[dict]]) -> list[str]:
 
 def sft_answers_for(prompts: list[list[dict]]) -> list[str]:
     """Generate from the SFT baseline adapter (loaded straight from the hub)."""
+    prefetch(cfg["sft_adapter_repo"])
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=cfg["sft_adapter_repo"], max_seq_length=cfg["max_seq_length"], load_in_4bit=True
     )
@@ -75,11 +93,13 @@ def dpo_answers_for(prompts: list[list[dict]]) -> list[str]:
     merge dpo_train did). Keeps eval working in a fresh session, not only right
     after training. Sequential with the SFT pass so both 8B models never coreside.
     """
+    prefetch(cfg["sft_adapter_repo"])
     sft, tok = FastLanguageModel.from_pretrained(
         model_name=cfg["sft_adapter_repo"], max_seq_length=cfg["max_seq_length"], load_in_4bit=True
     )
     sft.save_pretrained_merged(cfg["merged_sft_dir"], tok, save_method="merged_16bit")
     del sft
+    prefetch(cfg["adapter_hub_repo"])
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=cfg["adapter_hub_repo"], max_seq_length=cfg["max_seq_length"], load_in_4bit=True
     )
